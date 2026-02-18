@@ -83,9 +83,29 @@ struct Memory64Lowering : public WalkerPass<PostWalker<Memory64Lowering>> {
     return extendAddress64(ptr, tableName, true);
   }
 
-  void visitLoad(Load* curr) { wrapAddress64(curr->ptr, curr->memory); }
+  void ensureOffsetFits32(Expression*& ptr, Address& offset, Name memoryName) {
+    auto& module = *getModule();
+    if (module.getMemory(memoryName)->is64()) {
+      if (offset.addr > 0xffffffff) {
+        uint64_t conversionAmount = offset.addr & 0xffffffff00000000;
+        offset.addr &= 0xffffffff;
+        Builder builder(module);
+        ptr = builder.makeBinary(BinaryOp::AddInt64,
+                                 ptr,
+                                 builder.makeConst(int64_t(conversionAmount)));
+      }
+    }
+  }
 
-  void visitStore(Store* curr) { wrapAddress64(curr->ptr, curr->memory); }
+  void visitLoad(Load* curr) {
+    ensureOffsetFits32(curr->ptr, curr->offset, curr->memory);
+    wrapAddress64(curr->ptr, curr->memory);
+  }
+
+  void visitStore(Store* curr) {
+    ensureOffsetFits32(curr->ptr, curr->offset, curr->memory);
+    wrapAddress64(curr->ptr, curr->memory);
+  }
 
   void visitMemorySize(MemorySize* curr) {
     auto& module = *getModule();
@@ -149,18 +169,22 @@ struct Memory64Lowering : public WalkerPass<PostWalker<Memory64Lowering>> {
   }
 
   void visitAtomicRMW(AtomicRMW* curr) {
+    ensureOffsetFits32(curr->ptr, curr->offset, curr->memory);
     wrapAddress64(curr->ptr, curr->memory);
   }
 
   void visitAtomicCmpxchg(AtomicCmpxchg* curr) {
+    ensureOffsetFits32(curr->ptr, curr->offset, curr->memory);
     wrapAddress64(curr->ptr, curr->memory);
   }
 
   void visitAtomicWait(AtomicWait* curr) {
+    ensureOffsetFits32(curr->ptr, curr->offset, curr->memory);
     wrapAddress64(curr->ptr, curr->memory);
   }
 
   void visitAtomicNotify(AtomicNotify* curr) {
+    ensureOffsetFits32(curr->ptr, curr->offset, curr->memory);
     wrapAddress64(curr->ptr, curr->memory);
   }
 
