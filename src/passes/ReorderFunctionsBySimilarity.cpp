@@ -42,28 +42,26 @@ struct OpcodeSequenceBuilder
     if (sequence.size() >= MaxLen) {
       return;
     }
-    // Append the core expression ID
+    // Append the core expression ID and type
     sequence.push_back(curr->_id);
+    sequence.push_back(curr->type.getID());
 
-    // Capture important immediate type/operator information
-    // TODO: There's probably more data that would be useful to capture.
-    if (auto* unary = curr->dynCast<Unary>()) {
-      sequence.push_back(unary->op);
-    } else if (auto* binary = curr->dynCast<Binary>()) {
-      sequence.push_back(binary->op);
-    } else if (auto* load = curr->dynCast<Load>()) {
-      sequence.push_back(load->bytes);
-      sequence.push_back(load->offset);
-    } else if (auto* store = curr->dynCast<Store>()) {
-      sequence.push_back(store->bytes);
-      sequence.push_back(store->offset);
-    } else if (auto* localGet = curr->dynCast<LocalGet>()) {
-      sequence.push_back(localGet->type.getID());
-    } else if (auto* localSet = curr->dynCast<LocalSet>()) {
-      sequence.push_back(localSet->type.getID());
-    } else if (auto* const_ = curr->dynCast<Const>()) {
-      sequence.push_back(const_->type.getID());
-    }
+#define DELEGATE_ID curr->_id
+#define DELEGATE_START(id) [[maybe_unused]] auto* cast = curr->cast<id>();
+#define DELEGATE_GET_FIELD(id, field) cast->field
+
+#define DELEGATE_FIELD_TYPE(id, field)
+#define DELEGATE_FIELD_HEAPTYPE(id, field)
+#define DELEGATE_FIELD_CHILD(id, field)
+#define DELEGATE_FIELD_OPTIONAL_CHILD(id, field)
+#define DELEGATE_FIELD_INT(id, field) sequence.push_back(uint32_t(cast->field));
+#define DELEGATE_FIELD_LITERAL(id, field)
+#define DELEGATE_FIELD_NAME(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_DEF(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_USE(id, field)
+#define DELEGATE_FIELD_ADDRESS(id, field) sequence.push_back(uint32_t(cast->field));
+
+#include "wasm-delegations-fields.def"
   }
 };
 
