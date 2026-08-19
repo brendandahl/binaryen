@@ -507,3 +507,123 @@
 
 ;; (assert_trap (invoke "array.get-null") "null array")
 (assert_trap (invoke "i32.store_array_null") "null array")
+
+;;
+;; Multibyte access on arrays of non-i8 numeric element types. The `index`
+;; operand (plus the `offset` immediate) is a byte address into the array's
+;; storage viewed as L * E bytes, where E is the per-element byte size (4 for
+;; i32/f32, 8 for i64/f64), independent of the array's element type.
+;;
+
+(module
+  (type $i16_array (array (mut i16)))
+  (type $i32_array (array (mut i32)))
+  (type $f32_array (array (mut f32)))
+  (type $f64_array (array (mut f64)))
+
+  ;; 4 elements * 4 bytes = 16 bytes
+  (global $i32arr (ref $i32_array) (array.new_default $i32_array (i32.const 4)))
+  ;; 4 elements * 2 bytes = 8 bytes
+  (global $i16arr (ref $i16_array) (array.new_default $i16_array (i32.const 4)))
+  (global $f32arr (ref $f32_array) (array.new_default $f32_array (i32.const 2)))
+  (global $f64arr (ref $f64_array) (array.new_default $f64_array (i32.const 2)))
+
+  (func $i32arr_store_i32 (export "i32arr_store_i32") (param $idx i32) (param $val i32)
+    (i32.store (type $i32_array) (global.get $i32arr) (local.get $idx) (local.get $val)))
+  (func $i32arr_load_i32 (export "i32arr_load_i32") (param $idx i32) (result i32)
+    (i32.load (type $i32_array) (global.get $i32arr) (local.get $idx)))
+  (func $i32arr_load_i8_u (export "i32arr_load_i8_u") (param $idx i32) (result i32)
+    (i32.load8_u (type $i32_array) (global.get $i32arr) (local.get $idx)))
+  (func $i32arr_store_i64 (export "i32arr_store_i64") (param $idx i32) (param $val i64)
+    (i64.store (type $i32_array) (global.get $i32arr) (local.get $idx) (local.get $val)))
+  (func $i32arr_load_i64 (export "i32arr_load_i64") (param $idx i32) (result i64)
+    (i64.load (type $i32_array) (global.get $i32arr) (local.get $idx)))
+
+  ;; Same store, but via the `offset` immediate instead of baking the offset
+  ;; into the index operand. This must have identical behavior.
+  (func $i32arr_store_i32_off (export "i32arr_store_i32_off") (param $idx i32) (param $val i32)
+    (i32.store (type $i32_array) offset=4 (global.get $i32arr) (local.get $idx) (local.get $val)))
+  (func $i32arr_load_i32_off4 (export "i32arr_load_i32_off4") (param $idx i32) (result i32)
+    (i32.load (type $i32_array) offset=4 (global.get $i32arr) (local.get $idx)))
+
+  (func $i16arr_store_i16 (export "i16arr_store_i16") (param $idx i32) (param $val i32)
+    (i32.store16 (type $i16_array) (global.get $i16arr) (local.get $idx) (local.get $val)))
+  (func $i16arr_load_i32_16_u (export "i16arr_load_i32_16_u") (param $idx i32) (result i32)
+    (i32.load16_u (type $i16_array) (global.get $i16arr) (local.get $idx)))
+  (func $i16arr_load_i32_8_s (export "i16arr_load_i32_8_s") (param $idx i32) (result i32)
+    (i32.load8_s (type $i16_array) (global.get $i16arr) (local.get $idx)))
+
+  (func $f32arr_store (export "f32arr_store") (param $idx i32) (param $val f32)
+    (f32.store (type $f32_array) (global.get $f32arr) (local.get $idx) (local.get $val)))
+  (func $f32arr_load (export "f32arr_load") (param $idx i32) (result f32)
+    (f32.load (type $f32_array) (global.get $f32arr) (local.get $idx)))
+  ;; Reads the raw bit pattern (as an i32) from the f32 array, regardless of
+  ;; element alignment. Used to check unaligned/spanning reads exactly,
+  ;; without relying on float literal parsing for odd bit patterns.
+  (func $f32arr_load_i32_bits (export "f32arr_load_i32_bits") (param $idx i32) (result i32)
+    (i32.load (type $f32_array) (global.get $f32arr) (local.get $idx)))
+
+  (func $f64arr_store (export "f64arr_store") (param $idx i32) (param $val f64)
+    (f64.store (type $f64_array) (global.get $f64arr) (local.get $idx) (local.get $val)))
+  (func $f64arr_load (export "f64arr_load") (param $idx i32) (result f64)
+    (f64.load (type $f64_array) (global.get $f64arr) (local.get $idx)))
+)
+
+;; Round-trip through an i32-element array, byte-address 0.
+(assert_return (invoke "i32arr_store_i32" (i32.const 0) (i32.const 0x12345678)))
+(assert_return (invoke "i32arr_load_i32" (i32.const 0)) (i32.const 0x12345678))
+;; The bytes are little-endian within the element, exactly as for i8 arrays.
+(assert_return (invoke "i32arr_load_i8_u" (i32.const 0)) (i32.const 0x78))
+(assert_return (invoke "i32arr_load_i8_u" (i32.const 1)) (i32.const 0x56))
+(assert_return (invoke "i32arr_load_i8_u" (i32.const 2)) (i32.const 0x34))
+(assert_return (invoke "i32arr_load_i8_u" (i32.const 3)) (i32.const 0x12))
+;; The next element (byte address 4) is untouched.
+(assert_return (invoke "i32arr_load_i8_u" (i32.const 4)) (i32.const 0))
+
+;; The `offset` immediate and folding the offset into the index operand are
+;; equivalent.
+(assert_return (invoke "i32arr_store_i32_off" (i32.const 0) (i32.const 0xAABBCCDD)))
+(assert_return (invoke "i32arr_load_i32" (i32.const 4)) (i32.const 0xAABBCCDD))
+(assert_return (invoke "i32arr_load_i32_off4" (i32.const 0)) (i32.const 0xAABBCCDD))
+
+;; An i64 store/load that spans three i32 elements (byte addresses 2..9 out
+;; of a 16-byte, 4-element array).
+(assert_return (invoke "i32arr_store_i32" (i32.const 0) (i32.const 0)))
+(assert_return (invoke "i32arr_store_i32" (i32.const 4) (i32.const 0)))
+(assert_return (invoke "i32arr_store_i32" (i32.const 8) (i32.const 0)))
+(assert_return (invoke "i32arr_store_i32" (i32.const 12) (i32.const 0)))
+(assert_return (invoke "i32arr_store_i64" (i32.const 2) (i64.const 0x1122334455667788)))
+(assert_return (invoke "i32arr_load_i64" (i32.const 2)) (i64.const 0x1122334455667788))
+(assert_return (invoke "i32arr_load_i32" (i32.const 0)) (i32.const 0x77880000))
+(assert_return (invoke "i32arr_load_i32" (i32.const 4)) (i32.const 0x33445566))
+(assert_return (invoke "i32arr_load_i32" (i32.const 8)) (i32.const 0x00001122))
+(assert_return (invoke "i32arr_load_i32" (i32.const 12)) (i32.const 0))
+
+;; Bounds checks scale by element size: the array is 16 bytes (4 * i32).
+(assert_return (invoke "i32arr_load_i32" (i32.const 12)) (i32.const 0))
+(assert_trap (invoke "i32arr_load_i32" (i32.const 13)) "out of bounds")
+(assert_trap (invoke "i32arr_load_i64" (i32.const 9)) "out of bounds")
+(assert_trap (invoke "i32arr_store_i32" (i32.const 13) (i32.const 0)) "out of bounds")
+
+;; Sign extension for a partial load that crosses an i16 element boundary.
+(assert_return (invoke "i16arr_store_i16" (i32.const 0) (i32.const 0xFFFF)))
+(assert_return (invoke "i16arr_store_i16" (i32.const 2) (i32.const 0x007F)))
+(assert_return (invoke "i16arr_load_i32_16_u" (i32.const 1)) (i32.const 0x7FFF))
+(assert_return (invoke "i16arr_load_i32_8_s" (i32.const 1)) (i32.const -1))
+(assert_return (invoke "i16arr_load_i32_8_s" (i32.const 2)) (i32.const 0x7F))
+
+;; Round-trip through an f32-element array (natural, non-packed alignment).
+(assert_return (invoke "f32arr_store" (i32.const 0) (f32.const 3.5)))
+(assert_return (invoke "f32arr_load" (i32.const 0)) (f32.const 3.5))
+(assert_return (invoke "f32arr_store" (i32.const 4) (f32.const -1.25)))
+(assert_return (invoke "f32arr_load" (i32.const 4)) (f32.const -1.25))
+;; Unaligned/spanning f32 access across the two f32 elements: bytes [2,6)
+;; combine the top 2 bytes of element 0 (0x00,0x60) with the bottom 2 bytes
+;; of element 1 (0x00,0x40), giving the raw bit pattern 0x00004060.
+(assert_return (invoke "f32arr_load_i32_bits" (i32.const 2)) (i32.const 0x4060))
+
+;; Round-trip through an f64-element array (natural, non-packed alignment).
+(assert_return (invoke "f64arr_store" (i32.const 0) (f64.const 3.14159265358979)))
+(assert_return (invoke "f64arr_load" (i32.const 0)) (f64.const 3.14159265358979))
+(assert_return (invoke "f64arr_store" (i32.const 8) (f64.const -2.71828182845905)))
+(assert_return (invoke "f64arr_load" (i32.const 8)) (f64.const -2.71828182845905))

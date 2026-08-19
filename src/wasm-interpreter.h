@@ -393,20 +393,6 @@ protected:
     return Literal(allocation);
   }
 
-  template<typename T>
-  void writeBytes(T value, int numBytes, size_t index, Literals& values) {
-    if constexpr (std::is_same_v<T, std::array<uint8_t, 16>>) {
-      for (int i = 0; i < numBytes; ++i) {
-        values[index + i] = Literal(static_cast<int32_t>(value[i]));
-      }
-    } else {
-      for (int i = 0; i < numBytes; ++i) {
-        values[index + i] =
-          Literal(static_cast<int32_t>((value >> (i * 8)) & 0xff));
-      }
-    }
-  }
-
 public:
   // Indicates no limit of maxDepth or maxLoopIterations.
   static const Index NO_LIMIT = 0;
@@ -2469,17 +2455,20 @@ public:
     if (!data) {
       trap("null ref");
     }
-    Index i = index.getSingleValue().geti32();
-    size_t size = data->values.size();
-    if (i >= size || curr->bytes > (size - i)) {
-      trap("array oob");
-    }
-    uint64_t val = 0;
-    for (unsigned b = 0; b < curr->bytes; ++b) {
-      val |= static_cast<uint64_t>(data->values[i + b].geti32()) << (b * 8);
-    }
+    auto field = curr->ref->type.getHeapType().getArray().element;
+    auto elemSize = field.getByteSize();
+    uint64_t ea =
+      getMultibyteArrayAddress(index.getSingleValue(), curr->offset);
+    checkMultibyteArrayBounds(ea, curr->bytes, data->values.size(), elemSize);
+    std::array<uint8_t, 16> buf{};
+    copyMultibyteArrayBytes(
+      data->values, field, elemSize, ea, curr->bytes, buf.data(), true);
     switch (curr->type.getBasic()) {
       case Type::i32: {
+        uint32_t val = 0;
+        for (unsigned b = 0; b < curr->bytes; ++b) {
+          val |= static_cast<uint32_t>(buf[b]) << (b * 8);
+        }
         int32_t sval = static_cast<int32_t>(val);
         if (curr->signed_) {
           if (curr->bytes == 1) {
@@ -2491,6 +2480,10 @@ public:
         return Literal(sval);
       }
       case Type::i64: {
+        uint64_t val = 0;
+        for (unsigned b = 0; b < curr->bytes; ++b) {
+          val |= static_cast<uint64_t>(buf[b]) << (b * 8);
+        }
         int64_t sval = static_cast<int64_t>(val);
         if (curr->signed_) {
           if (curr->bytes == 1) {
@@ -2504,11 +2497,26 @@ public:
         return Literal(sval);
       }
       case Type::f32: {
-        return Literal(bit_cast<float>(static_cast<int32_t>(val)));
+        if (curr->bytes == 2) {
+          // Convert the float16 to float32.
+          uint16_t half = uint16_t(buf[0]) | (uint16_t(buf[1]) << 8);
+          return Literal(fp16_ieee_to_fp32_value(half));
+        }
+        uint32_t val = 0;
+        for (unsigned b = 0; b < 4; ++b) {
+          val |= static_cast<uint32_t>(buf[b]) << (b * 8);
+        }
+        return Literal(bit_cast<float>(val));
       }
       case Type::f64: {
-        return Literal(bit_cast<double>(static_cast<int64_t>(val)));
+        uint64_t val = 0;
+        for (unsigned b = 0; b < 8; ++b) {
+          val |= static_cast<uint64_t>(buf[b]) << (b * 8);
+        }
+        return Literal(bit_cast<double>(val));
       }
+      case Type::v128:
+        return Literal(buf.data());
       default:
         WASM_UNREACHABLE("invalid type");
     }
@@ -2522,42 +2530,59 @@ public:
     if (!data) {
       trap("null ref");
     }
+    auto field = curr->ref->type.getHeapType().getArray().element;
+    auto elemSize = field.getByteSize();
+    uint64_t ea =
+      getMultibyteArrayAddress(index.getSingleValue(), curr->offset);
+    checkMultibyteArrayBounds(ea, curr->bytes, data->values.size(), elemSize);
 
-    Index i = index.getSingleValue().geti32();
-    size_t size = data->values.size();
-    // Use subtraction to avoid overflow.
-    if (i >= size || curr->bytes > (size - i)) {
-      trap("array oob");
-    }
+    auto val = value.getSingleValue();
+    std::array<uint8_t, 16> buf{};
     switch (curr->value->type.getBasic()) {
-      case Type::i32:
-        writeBytes(
-          value.getSingleValue().geti32(), curr->bytes, i, data->values);
+      case Type::i32: {
+        uint32_t v = static_cast<uint32_t>(val.geti32());
+        for (unsigned b = 0; b < curr->bytes; ++b) {
+          buf[b] = uint8_t(v >> (b * 8));
+        }
         break;
-      case Type::i64:
-        writeBytes(
-          value.getSingleValue().geti64(), curr->bytes, i, data->values);
+      }
+      case Type::i64: {
+        uint64_t v = static_cast<uint64_t>(val.geti64());
+        for (unsigned b = 0; b < curr->bytes; ++b) {
+          buf[b] = uint8_t(v >> (b * 8));
+        }
         break;
-      case Type::f32:
-        writeBytes(value.getSingleValue().reinterpreti32(),
-                   curr->bytes,
-                   i,
-                   data->values);
+      }
+      case Type::f32: {
+        if (curr->bytes == 2) {
+          // Convert the float32 to float16.
+          uint16_t half = fp16_ieee_from_fp32_value(val.getf32());
+          buf[0] = uint8_t(half);
+          buf[1] = uint8_t(half >> 8);
+        } else {
+          uint32_t v = static_cast<uint32_t>(val.reinterpreti32());
+          for (unsigned b = 0; b < 4; ++b) {
+            buf[b] = uint8_t(v >> (b * 8));
+          }
+        }
         break;
-      case Type::f64:
-        writeBytes(value.getSingleValue().reinterpreti64(),
-                   curr->bytes,
-                   i,
-                   data->values);
+      }
+      case Type::f64: {
+        uint64_t v = static_cast<uint64_t>(val.reinterpreti64());
+        for (unsigned b = 0; b < 8; ++b) {
+          buf[b] = uint8_t(v >> (b * 8));
+        }
         break;
+      }
       case Type::v128:
-        writeBytes(
-          value.getSingleValue().getv128(), curr->bytes, i, data->values);
+        buf = val.getv128();
         break;
       case Type::none:
       case Type::unreachable:
         WASM_UNREACHABLE("unimp basic type");
     }
+    copyMultibyteArrayBytes(
+      data->values, field, elemSize, ea, curr->bytes, buf.data(), false);
     return Flow();
   }
   Flow visitArrayLen(ArrayLen* curr) {
@@ -2934,6 +2959,160 @@ public:
   }
 
 protected:
+  // Multibyte array.load/array.store operate on the array's storage as a
+  // flat sequence of L * E bytes, where L is the array length and E is the
+  // byte size of one element (which may be smaller than a byte, as in i8/i16
+  // packed arrays, or larger, as in i64/f64/v128 arrays). `index` and
+  // `offset` together give a byte address into that flat view, exactly as
+  // they would for a regular memory access.
+  uint64_t getMultibyteArrayAddress(Literal index, Address offset) {
+    return uint64_t(uint32_t(index.geti32())) + uint64_t(offset);
+  }
+
+  void checkMultibyteArrayBounds(uint64_t ea,
+                                 unsigned bytes,
+                                 size_t arrayLength,
+                                 unsigned elemSize) {
+    uint64_t totalBytes = uint64_t(arrayLength) * elemSize;
+    if (ea + bytes > totalBytes) {
+      trap("array oob");
+    }
+  }
+
+  // Decode a single array element into its little-endian byte
+  // representation.
+  std::array<uint8_t, 16> getElementBytes(Literal lit, const Field& field) {
+    std::array<uint8_t, 16> bytes{};
+    if (field.packedType != Field::NotPacked) {
+      uint32_t v = uint32_t(lit.geti32());
+      auto size = field.getByteSize();
+      for (unsigned i = 0; i < size; i++) {
+        bytes[i] = uint8_t(v >> (8 * i));
+      }
+      return bytes;
+    }
+    switch (field.type.getBasic()) {
+      case Type::i32: {
+        uint32_t v = uint32_t(lit.geti32());
+        for (unsigned i = 0; i < 4; i++) {
+          bytes[i] = uint8_t(v >> (8 * i));
+        }
+        break;
+      }
+      case Type::i64: {
+        uint64_t v = uint64_t(lit.geti64());
+        for (unsigned i = 0; i < 8; i++) {
+          bytes[i] = uint8_t(v >> (8 * i));
+        }
+        break;
+      }
+      case Type::f32: {
+        uint32_t v = uint32_t(lit.reinterpreti32());
+        for (unsigned i = 0; i < 4; i++) {
+          bytes[i] = uint8_t(v >> (8 * i));
+        }
+        break;
+      }
+      case Type::f64: {
+        uint64_t v = uint64_t(lit.reinterpreti64());
+        for (unsigned i = 0; i < 8; i++) {
+          bytes[i] = uint8_t(v >> (8 * i));
+        }
+        break;
+      }
+      case Type::v128:
+        bytes = lit.getv128();
+        break;
+      default:
+        WASM_UNREACHABLE("unexpected array element type");
+    }
+    return bytes;
+  }
+
+  // Encode a little-endian byte representation back into an array element,
+  // truncating as needed for packed (i8/i16) fields.
+  Literal setElementBytes(const std::array<uint8_t, 16>& bytes,
+                          const Field& field) {
+    if (field.packedType != Field::NotPacked) {
+      uint32_t v = 0;
+      auto size = field.getByteSize();
+      for (unsigned i = 0; i < size; i++) {
+        v |= uint32_t(bytes[i]) << (8 * i);
+      }
+      return truncateForPacking(Literal(int32_t(v)), field);
+    }
+    switch (field.type.getBasic()) {
+      case Type::i32: {
+        uint32_t v = 0;
+        for (unsigned i = 0; i < 4; i++) {
+          v |= uint32_t(bytes[i]) << (8 * i);
+        }
+        return Literal(int32_t(v));
+      }
+      case Type::i64: {
+        uint64_t v = 0;
+        for (unsigned i = 0; i < 8; i++) {
+          v |= uint64_t(bytes[i]) << (8 * i);
+        }
+        return Literal(int64_t(v));
+      }
+      case Type::f32: {
+        uint32_t v = 0;
+        for (unsigned i = 0; i < 4; i++) {
+          v |= uint32_t(bytes[i]) << (8 * i);
+        }
+        return Literal(bit_cast<float>(v));
+      }
+      case Type::f64: {
+        uint64_t v = 0;
+        for (unsigned i = 0; i < 8; i++) {
+          v |= uint64_t(bytes[i]) << (8 * i);
+        }
+        return Literal(bit_cast<double>(v));
+      }
+      case Type::v128:
+        return Literal(bytes.data());
+      default:
+        WASM_UNREACHABLE("unexpected array element type");
+    }
+  }
+
+  // Copy `numBytes` bytes between `buf` and the flattened byte view of a
+  // multibyte array's storage, starting at byte address `byteAddr`. If
+  // `toBuf` is true, bytes are copied from the array into `buf` (a load);
+  // otherwise from `buf` into the array (a store). The caller must have
+  // already bounds-checked the access.
+  void copyMultibyteArrayBytes(Literals& values,
+                               const Field& field,
+                               unsigned elemSize,
+                               uint64_t byteAddr,
+                               unsigned numBytes,
+                               uint8_t* buf,
+                               bool toBuf) {
+    unsigned done = 0;
+    while (done < numBytes) {
+      uint64_t addr = byteAddr + done;
+      size_t elemIndex = addr / elemSize;
+      unsigned byteInElem = addr % elemSize;
+      unsigned chunk = elemSize - byteInElem;
+      if (chunk > numBytes - done) {
+        chunk = numBytes - done;
+      }
+      auto elemBytes = getElementBytes(values[elemIndex], field);
+      if (toBuf) {
+        for (unsigned i = 0; i < chunk; i++) {
+          buf[done + i] = elemBytes[byteInElem + i];
+        }
+      } else {
+        for (unsigned i = 0; i < chunk; i++) {
+          elemBytes[byteInElem + i] = buf[done + i];
+        }
+        values[elemIndex] = setElementBytes(elemBytes, field);
+      }
+      done += chunk;
+    }
+  }
+
   // Truncate the value if we need to. The storage is just a list of Literals,
   // so we can't just write the value like we would to a C struct field and
   // expect it to truncate for us. Instead, we truncate so the stored value is
