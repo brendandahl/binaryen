@@ -2471,12 +2471,16 @@ public:
     if (!data) {
       trap("null ref");
     }
-    Index i = index.getSingleValue().geti32();
+    uint64_t addr =
+      (uint64_t)index.getSingleValue().getUnsigned() + curr->offset;
     size_t size = data->getRawBytes().size();
-    if (i >= size || curr->bytes > (size - i)) {
+    if (addr > size || curr->bytes > (size - addr)) {
       trap("array oob");
     }
-    const uint8_t* p = &data->getRawBytes()[i];
+    const uint8_t* p = &data->getRawBytes()[addr];
+    if (curr->type == Type::v128) {
+      return Literal::makeFromMemory(p, Type::v128);
+    }
     uint64_t val = 0;
     for (unsigned b = 0; b < curr->bytes; ++b) {
       val |= static_cast<uint64_t>(p[b]) << (b * 8);
@@ -2507,6 +2511,11 @@ public:
         return Literal(sval);
       }
       case Type::f32: {
+        if (curr->bytes == 2) {
+          return Literal(bit_cast<float>(
+                           fp16_ieee_to_fp32_value(static_cast<uint16_t>(val))))
+            .castToF32();
+        }
         return Literal(bit_cast<float>(static_cast<int32_t>(val)));
       }
       case Type::f64: {
@@ -2526,13 +2535,20 @@ public:
       trap("null ref");
     }
 
-    Index i = index.getSingleValue().geti32();
+    uint64_t addr =
+      (uint64_t)index.getSingleValue().getUnsigned() + curr->offset;
     size_t size = data->getRawBytes().size();
     // Use subtraction to avoid overflow.
-    if (i >= size || curr->bytes > (size - i)) {
+    if (addr > size || curr->bytes > (size - addr)) {
       trap("array oob");
     }
-    uint8_t* p = &data->getRawBytes()[i];
+    uint8_t* p = &data->getRawBytes()[addr];
+    if (curr->value->type == Type::f32 && curr->bytes == 2) {
+      float f32 = bit_cast<float>(value.getSingleValue().reinterpreti32());
+      uint16_t fp16 = fp16_ieee_from_fp32_value(f32);
+      memcpy(p, &fp16, 2);
+      return Flow();
+    }
     uint8_t buf[16];
     value.getSingleValue().getBits(buf);
     memcpy(p, buf, curr->bytes);
