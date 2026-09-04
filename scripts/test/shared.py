@@ -559,6 +559,12 @@ def binary_format_check(wast, verify_final_result=True, base_name=None, stdout=N
     return disassembled_file
 
 
+def pass_debug_env():
+    env = os.environ.copy()
+    env['BINARYEN_PASS_DEBUG'] = '1'
+    return env
+
+
 @contextmanager
 def with_pass_debug():
     old_pass_debug = os.environ.get('BINARYEN_PASS_DEBUG')
