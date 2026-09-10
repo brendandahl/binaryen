@@ -62,9 +62,14 @@ def run_one_wasm2js_test(item, stdout=None):
     basename = os.path.basename(t)
     print('..', basename, file=stdout)
 
-    split_file = f'split_{basename}_{opt}.wast'
-    mjs_file = f'a_{basename}_{opt}.2asm.mjs'
-    asserts_mjs_file = f'a_{basename}_{opt}.2asm.asserts.mjs'
+    # Include the path to avoid collisions between test suites (e.g. lit/basic,
+    # spec, and wasm2js) when running in parallel.
+    # /path/to/binaryen/test/wasm2js/foo.wast -> wasm2js-foo
+    rel = os.path.relpath(t, shared.options.binaryen_test)
+    base_name = os.path.splitext(rel)[0].replace(os.sep, '-')
+    split_file = f'split_{base_name}_{opt}.wast'
+    mjs_file = f'a_{base_name}_{opt}.2asm.mjs'
+    asserts_mjs_file = f'a_{base_name}_{opt}.2asm.asserts.mjs'
 
     all_js = []
     all_out = ''
